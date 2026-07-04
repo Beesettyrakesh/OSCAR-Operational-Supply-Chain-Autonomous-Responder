@@ -1,0 +1,24 @@
+# Python virtual environment (never commit — reproducible via documentation/requirements.txt)
+.venv/
+venv/
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets — NEVER commit API keys / tokens (see .env.example for the required keys)
+.env
+.env.local
+*.pem
+*.key
+secrets/
+
+# Runtime execution log (isolated raw-detail sink)
+incident_execution.log
+
+# OS / editor cruft
+.DS_Store

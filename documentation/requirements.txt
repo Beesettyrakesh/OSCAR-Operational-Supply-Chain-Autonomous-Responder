@@ -1,0 +1,14 @@
+# Autonomous Supply Chain Incident Commander — dependencies
+# Day 1 foundation. Additional packages (streamlit, colorama, google-adk) added on later days.
+
+# Strict typed State Ledger schema + validation (State Mutation Layer enforcement).
+pydantic>=2.6,<3.0
+
+# Model Context Protocol server for the Observation Tools (query_erp/inventory/shipment).
+mcp>=1.2.0
+
+# Unified Google Gen AI SDK — the Incident Commander orchestrator reasoning core.
+google-genai>=1.0.0
+
+# Loads GEMINI_API_KEY / GEMINI_MODEL from a local .env file (keeps secrets out of code).
+python-dotenv>=1.0.0

@@ -1,0 +1,36 @@
+MASTER SUPPLY AGREEMENT — REF CTR-4471 (Rev. 7)
+====================================================================
+
+THIS AGREEMENT is entered into by and between the Buyer ("Company") and the
+Vendor of record ("Supplier A", SUP-A) governing the recurring procurement of
+component SKU-99 and associated logistics obligations across all designated
+receiving facilities including, without limitation, PLANT-1 and PLANT-2.
+
+1. GENERAL TERMS. Supplier shall use commercially reasonable efforts to fulfil
+all Purchase Orders issued hereunder in accordance with the base lead-time
+frameworks recorded in the vendor master, subject to force majeure, customs
+clearance variance, carrier consolidation windows, and other ordinary-course
+transit contingencies as further described in Schedules B through F (omitted).
+
+2. QUALITY & CONFORMANCE. All lots must conform to the referenced engineering
+revision. Nonconforming goods may be rejected within the inspection window; the
+foregoing remedies are cumulative and not exclusive of any other remedy at law.
+
+3. LOGISTICS & DELIVERY. Title and risk of loss transfer upon delivery to the
+named destination facility. The parties acknowledge that estimated arrival
+telemetry is indicative only. Notwithstanding anything to the contrary in the
+preceding sentences, and for the avoidance of doubt buried within this clause,
+Late delivery penalties shall accrue at 3.0% per diem of total revenue exposure
+for each calendar day the confirmed shipment remains past its contracted arrival
+date, such accrual continuing until receipt is acknowledged or the Order is
+cancelled pursuant to Section 6.
+
+4. PRICING. Unit pricing is fixed for the term save for indexed pass-through
+adjustments tied to prevailing freight market conditions, which may fluctuate.
+
+5. AUTHORIZED SPEND. Procurement actions must remain within pre-approved
+corporate purchasing thresholds and vendor authorization parameters.
+
+6. TERMINATION. Either party may terminate for material breach uncured after
+the applicable notice period. Miscellaneous boilerplate regarding assignment,
+governing law, severability, and entire agreement follows in Annex Z (omitted).

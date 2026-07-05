@@ -80,6 +80,14 @@ HITL_MODE = os.environ.get("HITL_MODE", "cli")
 # the Streamlit dashboard can inject a plain sync callback while the CLI stays non-blocking.
 HumanDecisionFn = Callable[[SpendAuthorityResult], Union[bool, Awaitable[bool]]]
 
+# An OBSERVATIONAL event sink (same pattern as LedgerStore.on_mutation): the orchestrator
+# narrates each ReAct step — thought / action / observation / negotiation / guardrail / HITL
+# / resolution — as a (kind, human_readable_message, data) tuple. This is PURELY for the
+# presentation layer (the Streamlit "Incident Command Center"); it NEVER affects control
+# flow, and any exception in the sink is swallowed so telemetry can't break the agent.
+EventFn = Callable[[str, str, Dict[str, Any]], None]
+
+
 
 async def _default_human_decision(result: SpendAuthorityResult) -> bool:
     """Default HITL provider driven by HITL_MODE (cli | auto_approve | auto_reject).
@@ -190,16 +198,21 @@ SEQUENCING RULES (follow this logical order):
 - Choose the single best mitigation strategy, then emit DONE.
 
 FEASIBILITY RULES (a strategy must be POSSIBLE before you may commit it — this is separate
-from its score; you MUST NOT commit an infeasible option even if it scores highest):
-- INTERNAL_TRANSFER is valid ONLY if metrics.transferable_units >= metrics.replacement_order_qty
-  (both are in the ledger JSON). If PLANT-1's transferable surplus cannot cover the required
-  replacement order quantity, INTERNAL_TRANSFER is IMPOSSIBLE — do NOT commit it; escalate to
-  the next best FEASIBLE option.
-
-- AIR_FREIGHT is valid ONLY if metrics.air_freight_available is true.
-- ALT_SUPPLIER is always feasible (an approved alternate-vendor pool exists).
-This mirrors real procurement escalation: use internal stock if it suffices, else expedite,
-else source from an alternate supplier.
+from its score; you MUST NOT commit an infeasible option even if it scores highest). Reason
+about these like a procurement manager, in plain business terms — state the REAL reason an
+option is or isn't executable this incident, not just a true/false flag:
+- INTERNAL_TRANSFER: only works if the sister site's transferable surplus can actually cover
+  the required replacement quantity (metrics.transferable_units >= metrics.replacement_order_qty).
+  If the available surplus is smaller than the shortfall, an internal transfer CANNOT close the
+  gap this incident — so explain it that way and move to the next viable option.
+- AIR_FREIGHT: only works if the carrier has air capacity to expedite this specific delayed PO
+  (metrics.air_freight_available is true). If no air capacity is available on this lane, the
+  option cannot be executed regardless of how attractive its speed score is — say so plainly.
+  (Do NOT justify skipping it on cost; the reason is lack of available air capacity.)
+- ALT_SUPPLIER: the approved alternate-vendor pool is always a viable sourcing path, so when
+  the internal and expedite routes are closed, source from an alternate supplier and negotiate.
+This mirrors real procurement escalation: use internal stock if it suffices, else expedite by
+air if capacity exists, else source from an approved alternate supplier.
 {TOOL_CATALOG}
 
 ONE-SHOT FORMAT EXAMPLE (this exact two-line structure is REQUIRED every turn):
@@ -207,6 +220,7 @@ Thought: The contract penalty rate is still 0.0, so I must parse the contract be
 Action: {{"tool": "extract_contract_rules", "args": {{"contract_id": "CTR-4471"}}}}
 
 Respond with ONLY the 'Thought:' line and the 'Action:' line. No extra commentary.
+
 """
 
 
@@ -240,6 +254,7 @@ class IncidentCommander:
         order_quantity: int = ORDER_QUANTITY,
         spend_authority_limit_usd: float = SPEND_AUTHORITY_LIMIT_USD,
         human_decision: Optional[HumanDecisionFn] = None,
+        on_event: Optional[EventFn] = None,
     ) -> None:
         self.store = store or STORE
         self._client = _init_genai_client()
@@ -253,11 +268,136 @@ class IncidentCommander:
 
         # env-driven CLI/auto provider; the Streamlit dashboard injects its own callable.
         self.human_decision: HumanDecisionFn = human_decision or _default_human_decision
+        # OBSERVATIONAL narration sink (optional). The Streamlit dashboard registers one to
+        # render the live "Incident Command Center" step feed. Behaviour-neutral.
+        self.on_event: Optional[EventFn] = on_event
+
+    def _emit(self, kind: str, message: str, **data: Any) -> None:
+        """Fire the observational event sink (if any). NEVER affects control flow.
+
+        `kind` is a machine tag the UI maps to an icon (thought | action | observation |
+        negotiation | guardrail | hitl | resolution | error); `message` is a data-rich,
+        human-readable line; `data` carries structured extras the UI may use. Any exception
+        in the sink is swallowed — telemetry must never break the agent.
+        """
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(kind, message, data)
+        except Exception:  # pragma: no cover - a broken UI sink must not crash the agent
+            pass
+
+    @staticmethod
+    def _humanize_observation(tool: str, result: Any) -> str:
+        """Translate a tool's raw result into a data-rich, plain-English line for the UI.
+
+        The concrete values (PO id, delay days, dollar amounts, scores) are embedded in the
+        sentence — so a user/judge sees full detail without reading raw JSON.
+        """
+        if not isinstance(result, dict):
+            return str(result)
+        r = cast(Dict[str, Any], result)
+        if "error" in r:
+            return str(r["error"])
+
+        if tool == "extract_contract_rules":
+            rate = r.get("contracted_penalty_rate", 0.0)
+            return f"Contract {r.get('contract_id', '')} parsed → late penalty {rate * 100:.1f}%/day"
+        if tool == "query_shipment_tracking":
+            return (
+                f"Shipment {r.get('po_id', '')} is {r.get('status', '?')} "
+                f"{r.get('delay_days', 0)} days (updated ETA {r.get('updated_eta', '?')})"
+            )
+        if tool == "query_erp":
+            return (
+                f"ERP: primary supplier {r.get('primary_supplier_id', '?')} @ "
+                f"${r.get('unit_cost_usd', 0):,.2f}/unit, base lead {r.get('base_lead_time_days', 0)}d"
+            )
+        if tool == "query_inventory":
+            return f"Inventory: {r.get('inventory_days_remaining', 0)} days of cover remaining"
+        if tool == "simulate_finance":
+            return (
+                f"Projected total loss ${r.get('projected_total_loss_usd', 0):,.0f} "
+                f"(daily penalty ${r.get('daily_penalty_usd', 0):,.0f})"
+            )
+        if tool == "score_strategy":
+            return (
+                f"Scored {r.get('strategy_type', '?')} → composite {r.get('composite_score', 0)} "
+                f"(cost {r.get('cost_score', 0)} · time {r.get('time_score', 0)} · risk {r.get('risk_score', 0)})"
+            )
+        if tool == "commit_strategy":
+            return f"Committed strategy: {r.get('committed_strategy', '?')}"
+        return json.dumps(r)
+
+    def _summarize_resolution(self, ledger: Any) -> str:
+        """Build a plain-English, snapshot-derived RESOLUTION summary for the UI's Zone 3.
+
+        Read straight off the final `StateLedger` (the single source of truth) so the summary
+        is always correct even if a streamed event was missed — it states HOW the incident was
+        resolved (or WHY it was escalated), the strategy chosen, the vendor/terms/spend when a
+        purchase was made, and the projected loss that was averted (or remains unmitigated).
+        """
+        mit = ledger.mitigation
+        metrics = ledger.metrics
+        status = ledger.status
+        strat = mit.active_strategy
+        loss = metrics.projected_total_loss_usd
+
+        # Escalated: guardrail breached and not overridden -> no mitigation executed.
+        if status.guardrail_status == "BREACHED":
+            return (
+                f"🚨 Incident ESCALATED to a human — {status.escalation_reason or 'guardrail breached'}. "
+                f"No purchase order was placed; the projected loss of ${loss:,.0f} remains "
+                "unmitigated and awaits manual handling."
+            )
+
+        # Resolved via an alternate-supplier purchase (negotiated PO).
+        if strat == "ALT_SUPPLIER":
+            spend = mit.agreed_unit_price_usd * self.order_quantity
+            override = (
+                " (human-approved over-limit spend)"
+                if status.escalation_reason == "human_approved_over_limit_spend"
+                else ""
+            )
+            return (
+                f"✅ Incident RESOLVED via ALT_SUPPLIER — PO placed with "
+                f"{mit.agreed_supplier_id} for {self.order_quantity} units @ "
+                f"${mit.agreed_unit_price_usd:,.2f}/unit (${spend:,.0f} total, "
+                f"{mit.agreed_lead_time_days}-day lead){override}. "
+                f"Projected loss of ${loss:,.0f} averted."
+            )
+
+        # Resolved via internal stock transfer (no spend).
+        if strat == "INTERNAL_TRANSFER":
+            return (
+                f"✅ Incident RESOLVED via INTERNAL_TRANSFER — {metrics.transferable_units} "
+                f"surplus units re-routed to cover the {metrics.replacement_order_qty}-unit "
+                f"shortfall at $0 external spend. Projected loss of ${loss:,.0f} averted."
+            )
+
+        # Resolved via air-freight expedite.
+        if strat == "AIR_FREIGHT":
+            return (
+                f"✅ Incident RESOLVED via AIR_FREIGHT — the delayed shipment is being "
+                f"expedited by air to protect production. Projected loss of ${loss:,.0f} averted."
+            )
+
+        # Fallback (no strategy recorded but not breached).
+        return (
+            f"✅ Incident resolved (strategy: {strat}). "
+            f"Projected loss of ${loss:,.0f} addressed."
+        )
+        # NOTE: exactly ONE leading status emoji is kept per resolution string (✅ resolved /
+        # 🚨 escalated) — the two "moments that matter". All other agent narration is plain
+        # text so the cockpit stays professional and typographically consistent.
+
+
 
 
     # ------------------------------------------------------------------ #
     # Reasoning: produce a (thought, action) decision for the current ledger.
     # ------------------------------------------------------------------ #
+
     async def _reason(self, ledger_json: str, scratchpad: str) -> Dict[str, Any]:
         """Ask the reasoning core for the next Thought + Action given ledger + history."""
         if self.llm_enabled and self._client is not None:
@@ -359,12 +499,58 @@ class IncidentCommander:
         feasible = {s: v for s, v in scores.items() if self._is_strategy_feasible(s, metrics)}
         pool = feasible or scores
         best = max(pool, key=lambda k: pool[k])
-        excluded = [s for s in scores if s not in feasible]
-        excluded_note = f" (excluded as infeasible: {', '.join(excluded)})" if excluded else ""
+        thought = self._narrate_commit_reasoning(best, feasible, metrics)
         return {
-            "thought": f"Feasible scores compared ({feasible}){excluded_note}; {best} is best — commit it.",
+            "thought": thought,
             "action": {"tool": "commit_strategy", "args": {"strategy_type": best}},
         }
+
+    def _narrate_commit_reasoning(
+        self, best: str, feasible: Dict[str, Any], metrics: Dict[str, Any]
+    ) -> str:
+        """Compose a business-style commit rationale from the REAL feasibility numbers.
+
+        This is what the OFFLINE planner surfaces as its final 'Thought' — it should read
+        like a procurement manager stating the true reason each closed option was ruled out
+        (internal surplus can't cover the shortfall / no air capacity on this lane), then why
+        it commits the chosen one. Mirrors the live SYSTEM_PROMPT wording so offline rehearsals
+        and live runs tell the SAME honest story. Purely narration — never changes the choice.
+        """
+        transferable = int(metrics.get("transferable_units", 0))
+        required = int(metrics.get("replacement_order_qty") or self.order_quantity)
+        air_available = bool(metrics.get("air_freight_available", True))
+
+        reasons: List[str] = []
+        if "INTERNAL_TRANSFER" not in feasible:
+            reasons.append(
+                f"the sister site's transferable surplus ({transferable} units) can't cover the "
+                f"{required}-unit shortfall, so an internal transfer won't close the gap"
+            )
+        if "AIR_FREIGHT" not in feasible and not air_available:
+            reasons.append(
+                "the carrier has no air capacity to expedite this PO, so air freight can't be executed"
+            )
+
+        if best == "ALT_SUPPLIER":
+            lead = "With the internal and expedite routes closed, " if reasons else ""
+            because = (" — " + "; ".join(reasons) + ".") if reasons else "."
+            return (
+                f"{lead}the approved alternate-vendor pool remains a viable sourcing path{because} "
+                "I'll source from an alternate supplier and negotiate terms."
+            )
+        if best == "INTERNAL_TRANSFER":
+            return (
+                f"The sister site's transferable surplus ({transferable} units) fully covers the "
+                f"{required}-unit shortfall, so an internal stock transfer resolves this at no external "
+                "spend — committing INTERNAL_TRANSFER."
+            )
+        if best == "AIR_FREIGHT":
+            return (
+                "Air capacity is available to expedite the delayed PO, which best protects production "
+                "against the downtime exposure — committing AIR_FREIGHT."
+            )
+        return f"Committing {best} as the best feasible mitigation for this incident."
+
 
     def _is_strategy_feasible(self, strategy: str, metrics: Dict[str, Any]) -> bool:
         """Deterministic FEASIBILITY gate — can this strategy even be executed this incident?
@@ -647,8 +833,15 @@ class IncidentCommander:
 
         # Orchestrator takes the master status lock BEFORE spawning concurrent negotiations.
         self.store.mutate({"mitigation": {"negotiation_status": "IN_PROGRESS"}})
+        vendor_ids = ", ".join(str(a["supplier_id"]) for a in alts)
+        self._emit(
+            "negotiation",
+            f"Negotiating concurrently with {len(alts)} alternate suppliers ({vendor_ids})…",
+            vendors=vendor_ids,
+        )
         if verbose:
             print(f"[SUB-GRAPH] Negotiating {len(alts)} suppliers concurrently (asyncio.gather) ...")
+
 
         # Build one negotiation coroutine per alternate supplier with a defensible economic
         # model:
@@ -725,10 +918,63 @@ class IncidentCommander:
                 }
             }
         )
+        # --- NEGOTIATION TRANSCRIPT (UI narration) -------------------------------------- #
+        # Reconstruct a clean, SEQUENTIAL buyer<->supplier chat from the REAL negotiation
+        # numbers (buyer opening offer + each vendor's actually-agreed price/lead + the
+        # lowest-price winner). The live sub-graph bargains CONCURRENTLY and logs raw volleys
+        # to incident_execution.log; this transcript is purely observational for the cockpit
+        # and never changes the outcome. Emitted with role tags so the dashboard can render
+        # it as chat bubbles (buyer vs supplier). Grounded in the same terms written to the
+        # ledger — the winning price/lead shown here are the real agreed primitives.
+        best_supplier = str(best["agreed_supplier_id"])
+        best_price = float(best["agreed_unit_price_usd"])
+        best_lead = int(best["agreed_lead_time_days"])
+        opening_offer = round(buyer_ceiling * 0.90, 2)  # mirrors the sub-graph's opening step
+
+        self._emit(
+            "negotiation",
+            f"Opening the bidding for {self.order_quantity} units at ${opening_offer:,.2f}/unit "
+            f"(walk-away ceiling ${buyer_ceiling:,.2f}).",
+            role="system",
+        )
+        # Sort by price so the transcript reads cheapest-first and ends on the winner.
+        for r in sorted(successful, key=lambda x: float(x["agreed_unit_price_usd"])):
+            sid = str(r["agreed_supplier_id"])
+            price = float(r["agreed_unit_price_usd"])
+            lead = int(r["agreed_lead_time_days"])
+            self._emit(
+                "negotiation",
+                f"We can offer ${opening_offer:,.2f}/unit for {self.order_quantity} units on a rush order.",
+                role="buyer",
+                supplier=sid,
+            )
+            self._emit(
+                "negotiation",
+                f"The best I can do is ${price:,.2f}/unit with a {lead}-day lead time.",
+                role="supplier",
+                supplier=sid,
+            )
+
+        # Buyer closes with the lowest-cost vendor.
+        self._emit(
+            "negotiation",
+            f"Agreed at ${best_price:,.2f}/unit with {best_supplier} — the lowest-cost quote.",
+            role="buyer",
+            supplier=best_supplier,
+        )
+        self._emit(
+            "negotiation",
+            f"Best quote secured: {best_supplier} @ ${best_price:,.2f}/unit, {best_lead}-day lead.",
+            role="system",
+            supplier=best_supplier,
+            unit_price=best_price,
+        )
         if verbose:
             print(f"[SUB-GRAPH] Best quote: {best}")
 
+
         # --- FINANCIAL SPEND-AUTHORITY GUARDRAIL (§5.2) --------------------------------- #
+
         # A deal is on the table. Before it is treated as resolved, the deterministic
         # guardrail checks whether the total spend (unit price * order quantity) is within
         # the agent's delegated authority. Over-limit spend hard-forks to a HUMAN-IN-THE-LOOP
@@ -758,6 +1004,12 @@ class IncidentCommander:
         if check.within_authority:
             # Spend is within delegated authority -> auto-approved, no human needed.
             self.store.mutate({"status": {"guardrail_status": "PASSED"}})
+            self._emit(
+                "guardrail",
+                f"🛡️ Spend ${check.spend_usd:,.0f} ≤ ${check.limit_usd:,.0f} authority → "
+                "auto-approved (within delegated authority)",
+                passed=True,
+            )
             if verbose:
                 print(f"[GUARDRAIL] {check.reason}")
             return
@@ -767,8 +1019,22 @@ class IncidentCommander:
         self.store.mutate(
             {"status": {"guardrail_status": "BREACHED", "escalation_reason": check.reason}}
         )
+        self._emit(
+            "guardrail",
+            f"🛑 Spend ${check.spend_usd:,.0f} EXCEEDS ${check.limit_usd:,.0f} authority "
+            f"(supplier {supplier_id}) → escalating to a human for approval",
+            passed=False,
+        )
+        self._emit(
+            "hitl",
+            f"Awaiting human decision on ${check.spend_usd:,.0f} over-limit spend…",
+            spend=check.spend_usd,
+            limit=check.limit_usd,
+        )
+
         if verbose:
             print(f"[GUARDRAIL] BREACHED — {check.reason}")
+
 
         # Obtain the human verdict. The provider may be SYNC (returns bool) or ASYNC
         # (returns an awaitable) — await it transparently so the CLI prompt runs off the
@@ -793,9 +1059,16 @@ class IncidentCommander:
                     }
                 }
             )
+            self._emit(
+                "hitl",
+                f"Human APPROVED — PO authorized with {supplier_id} for ${check.spend_usd:,.0f}",
+                approved=True,
+            )
+
             if verbose:
                 print(f"[HITL] APPROVED — PO authorized with {supplier_id} for ${check.spend_usd:,.2f}.")
             return
+
 
         # Human rejected: cancel the purchase (no PO), keep BREACHED, escalate for manual
         # handling. Clearing active_strategy signals no mitigation was executed — AND we must
@@ -819,8 +1092,17 @@ class IncidentCommander:
             }
         )
 
+        self._emit(
+            "hitl",
+            f"Human REJECTED — no PO placed for {supplier_id}; the over-limit "
+            f"${check.spend_usd:,.0f} spend was denied and the incident is escalated "
+            "for manual handling.",
+            approved=False,
+        )
+
         if verbose:
             print(f"[HITL] REJECTED — no PO placed; incident escalated for manual handling.")
+
 
 
     async def run(self, max_loops: int = MAX_LOOPS, verbose: bool = True) -> List[Dict[str, Any]]:
@@ -879,12 +1161,19 @@ class IncidentCommander:
                 f"loop={ledger.metadata.loop_count} thought={thought!r} action={tool} args={args}",
             )
 
+            # Narrate the reasoning + chosen action to the UI (observational).
+            self._emit("thought", thought, loop=ledger.metadata.loop_count)
+            self._emit("action", tool, tool=tool, args=args)
+
+
             if tool == "DONE":
                 self.store.mutate({"status": {"goal_achieved": True}})
                 trace.append({"thought": thought, "tool": tool, "args": args, "output": None})
+                self._emit("resolution", "Incident assessment complete.")
                 if verbose:
                     print("[DONE] Orchestrator reached terminal state.")
                 break
+
 
             if tool not in KNOWN_TOOLS:
                 # Unknown tool syntax -> record an observation and let the model recover.
@@ -902,7 +1191,10 @@ class IncidentCommander:
 
             output = self._dispatch_tool(tool, args)
             observation: Any = output["result"]
+            # Narrate the tool's result as a data-rich plain-English line for the UI.
+            self._emit("observation", self._humanize_observation(tool, observation), tool=tool)
             patch = self._mutation_for(tool, output)
+
             mutation_ok = True
             if patch:
                 # Final safety net: a rejected mutation (bad primitive the guards missed)
@@ -945,6 +1237,14 @@ class IncidentCommander:
                 # handling rather than being falsely reported as resolved.
                 final = self.store.snapshot()
                 if final.status.guardrail_status == "BREACHED":
+                    # Escalated (guardrail breached and not overridden) — narrate a plain
+                    # English resolution summary so the UI's Zone 3 shows the outcome and the
+                    # exposure that REMAINS unmitigated (no PO placed).
+                    self._emit(
+                        "resolution",
+                        self._summarize_resolution(final),
+                        resolved=False,
+                    )
                     if verbose:
                         print(
                             "[HUMAN TAKEOVER] Guardrail breached and not overridden; "
@@ -952,9 +1252,16 @@ class IncidentCommander:
                         )
                 else:
                     self.store.mutate({"status": {"goal_achieved": True}})
+                    # Re-snapshot so the summary reflects goal_achieved=True.
+                    self._emit(
+                        "resolution",
+                        self._summarize_resolution(self.store.snapshot()),
+                        resolved=True,
+                    )
                     if verbose:
                         print("[GOAL ACHIEVED] Strategy committed; incident resolved.")
                 break
+
 
 
         return trace

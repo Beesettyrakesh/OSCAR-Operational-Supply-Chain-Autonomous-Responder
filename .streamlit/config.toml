@@ -1,0 +1,20 @@
+# Streamlit configuration for the Incident Command Center.
+#
+# We present a clean, production-style operations console for judges, so we trim Streamlit's
+# developer-facing chrome:
+#   * toolbarMode = "minimal"  -> removes the "Deploy" button and the developer options in the
+#                                 top-right menu (Rerun / Auto-rerun / Clear cache / Record),
+#                                 which are irrelevant to an enterprise agent demo.
+#   * gatherUsageStats = false -> no anonymous telemetry.
+# The app uses no @st.cache_data / @st.cache_resource, so trimming these menus removes nothing
+# functional — it just makes the UI look like a real product instead of a dev sandbox.
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"

@@ -220,23 +220,12 @@ def _run_agent(sess: AgentSession, params: Dict[str, Any]) -> None:
             os.environ["GEMINI_API_KEY"] = params["gemini_key"]  # -> live Gemini core
             os.environ["VENDOR_MODE"] = "llm"
 
-        scenario = SCENARIOS.get(params["scenario"], SCENARIOS["transfer_available"])
-
-        STORE.init_incident(
-            target_sku="SKU-99",
-            primary_supplier_id="SUP-A",
-            active_contract_id="CTR-4471",
-            current_purchase_order_id="PO-88123",
-            impacted_plants=["PLANT-2"],
-            inventory_days_remaining=2,
-            production_shutdown_hours=48,
-            revenue_at_risk_usd=4200.0,
-            transferable_units=scenario["transferable_units"],
-            air_freight_available=scenario["air_freight_available"],
-            replacement_order_qty=params["order_quantity"],
-        )
-
+        # NOTE: the incident ledger is initialized SYNCHRONOUSLY on the UI thread in
+        # `_start` (before this thread is spawned), so it is guaranteed to exist by the time
+        # the UI reads `STORE.snapshot()`. We do NOT init it here — doing so on the worker
+        # thread created an init race the UI could only paper over with an exception + sleep.
         commander = IncidentCommander(
+
             order_quantity=params["order_quantity"],
             spend_authority_limit_usd=params["spend_limit"],
             human_decision=sess.bridge.decide,  # ASYNC bridge — awaited by the orchestrator
@@ -282,7 +271,14 @@ def _get_original_key() -> str:
 
 
 def _start(sess: AgentSession, params: Dict[str, Any]) -> None:
-    """Spawn the agent thread ONCE (guard against Streamlit's per-interaction reruns)."""
+    """Spawn the agent thread ONCE (guard against Streamlit's per-interaction reruns).
+
+    INIT ORDER (fixes the init race): the incident ledger is initialized SYNCHRONOUSLY here,
+    on the UI thread, BEFORE the worker thread is spawned. This guarantees `STORE.snapshot()`
+    always succeeds on the next rerun — so the UI needs no exception-handler-plus-sleep hack
+    to tolerate an uninitialized ledger. `init_incident` is a fast, lock-protected in-memory
+    call, so running it on the UI thread is safe and cheap.
+    """
     if sess.running:
         return
     sess.bridge.reset()
@@ -290,10 +286,29 @@ def _start(sess: AgentSession, params: Dict[str, Any]) -> None:
     sess.core_mode = ""
     sess.last_revision = -1
     sess.error = None
+
+    # Establish the single source of truth up front (UI thread) — the worker thread will only
+    # read/mutate it, never (re-)create it.
+    scenario = SCENARIOS.get(params["scenario"], SCENARIOS["transfer_available"])
+    STORE.init_incident(
+        target_sku="SKU-99",
+        primary_supplier_id="SUP-A",
+        active_contract_id="CTR-4471",
+        current_purchase_order_id="PO-88123",
+        impacted_plants=["PLANT-2"],
+        inventory_days_remaining=2,
+        production_shutdown_hours=48,
+        revenue_at_risk_usd=4200.0,
+        transferable_units=scenario["transferable_units"],
+        air_freight_available=scenario["air_freight_available"],
+        replacement_order_qty=params["order_quantity"],
+    )
+
     sess.running = True
     sess.started = True
     sess.thread = threading.Thread(target=_run_agent, args=(sess, params), daemon=True)
     sess.thread.start()
+
 
 
 def _reset(sess: AgentSession) -> None:
@@ -638,16 +653,13 @@ def main() -> None:
     if sess.error:
         st.error(f"Agent error: {sess.error}")
 
-    # Read the live ledger (thread-safe). Before init it would raise — guard just in case.
-    try:
-        ledger = STORE.snapshot()
-    except RuntimeError:
-        st.warning("Dispatching incident…")
-        time.sleep(0.3)
-        st.rerun()
-        return
+    # Read the live ledger (thread-safe). It was initialized SYNCHRONOUSLY in `_start` before
+    # the worker thread was spawned, so once `sess.started` is true the ledger always exists —
+    # no exception-handler + sleep hack needed for cross-thread init timing.
+    ledger = STORE.snapshot()
 
     ctx = ledger.context
+
     meta = ledger.metadata
     core_note = f" · Core: {sess.core_mode}" if sess.core_mode else ""
     st.caption(

@@ -350,9 +350,70 @@ def _render_vitals(ledger: Any, running: bool, outcome: Optional[str]) -> None:
 
     c1, c2, c3 = st.columns(3)
 
-    c1.metric("Projected Loss", f"${metrics.projected_total_loss_usd:,.0f}")
-    c2.metric("Revenue at Risk", f"${metrics.revenue_at_risk_usd:,.0f}")
+    c1.metric(
+        "Projected Loss",
+        f"${metrics.projected_total_loss_usd:,.0f}",
+        help=_projected_loss_help(ledger),
+    )
+    c2.metric(
+        "Revenue at Risk",
+        f"${metrics.revenue_at_risk_usd:,.0f}",
+        help=_revenue_at_risk_help(ledger),
+    )
     c3.metric("Status", status_label, help=status_help)
+
+
+def _revenue_at_risk_help(ledger: Any) -> str:
+    """Tooltip for Revenue at Risk — a fixed incident input (not a derived figure).
+
+    Rendered as Markdown by Streamlit's `help=`; kept to short, separate lines.
+    """
+    rar = ledger.metrics.revenue_at_risk_usd
+    return (
+        f"**Revenue at Risk — ${rar:,.0f}**\n\n"
+        "Baseline downstream revenue threatened by the SKU-99 shortfall.\n\n"
+        "Fixed incident input · the basis for the penalty & downtime math."
+    )
+
+
+def _projected_loss_help(ledger: Any) -> str:
+    """Tooltip for Projected Loss — the plugged-in `simulate_finance` breakdown.
+
+    Rendered as Markdown by Streamlit's `help=` with one component per list line (never a
+    paragraph). Recomputes each component from the live ledger so the arithmetic always
+    matches the delay lever. Before simulate_finance has run (penalty rate still 0), show the
+    formula only.
+    """
+    m = ledger.metrics
+    rar = m.revenue_at_risk_usd
+    rate = ledger.context.contracted_penalty_rate
+    delay = m.delay_days
+    buffer_days = m.inventory_days_remaining
+    shutdown_hours = m.production_shutdown_hours
+    total = m.projected_total_loss_usd
+
+    if total <= 0 or rate <= 0:
+        # Pre-simulation state — show the formula rather than a half-populated sum.
+        return (
+            "**Projected Loss**\n\n"
+            "`simulate_finance` = revenue + penalty + post-buffer downtime\n\n"
+            "Computed once the contract penalty is parsed."
+        )
+
+    penalty = rate * rar * delay
+    shutdown_days = max(0, delay - buffer_days)
+    downtime = (rar / shutdown_hours) * 24 * shutdown_days if shutdown_hours else 0.0
+    # One calculation per Markdown list line.
+    return (
+        f"**Projected Loss — ${total:,.0f}**\n\n"
+        "`simulate_finance` = revenue + penalty + post-buffer downtime\n\n"
+        f"- Revenue at risk: **${rar:,.0f}**\n"
+        f"- Penalty: ${rar:,.0f} × {rate * 100:.1f}%/day × {delay}d = **${penalty:,.0f}**\n"
+        f"- Downtime: (${rar:,.0f} ÷ {shutdown_hours}h) × 24h × {shutdown_days}d = **${downtime:,.0f}**\n"
+        f"- **Total: ${total:,.0f}**"
+    )
+
+
 
 
 def _thought_text(message: str) -> str:

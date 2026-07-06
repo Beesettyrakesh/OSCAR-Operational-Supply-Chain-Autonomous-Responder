@@ -176,23 +176,31 @@ For the seeded incident — `revenue_at_risk = $75,000`, penalty rate `3.0%/day`
 
 The delay is a live dashboard/CLI lever, so this figure is dynamic — change the delay and the exposure recomputes. The daily penalty is constant because it depends on the (fixed) revenue basis and contract rate, not on the delay.
 
-### `score_strategy` — fixed deterministic engine outputs
+### `score_strategy` — a transparent weighted rubric
 
-Each candidate strategy is scored on cost, time, and risk (higher = better), combined into a weighted composite:
+The composite score is a deterministic three-factor rubric, not an LLM judgement. Each strategy starts from a fixed **base profile** (cost / speed / reliability, each 0–100), which is then adjusted by live ledger signals and combined with fixed weights:
 
 ```
-composite = 0.35 × cost_score + 0.40 × time_score + 0.25 × risk_score
+cost_score = base_cost / market_freight_index          # freight-market pressure (index 1.0 here)
+time_score = base_speed × urgency                       # urgency = 1 + max(0, 3 − inventory_days_remaining) × 0.05
+risk_score = base_reliability × severity_discount       # LOW 1.00 · MEDIUM 0.95 · HIGH 0.90 · CRITICAL 0.85
+composite  = 0.35 × cost_score + 0.40 × time_score + 0.25 × risk_score
 ```
 
-Scores are context-driven from ledger signals (freight index, inventory urgency, incident severity). For the seeded incident the engine produces these fixed composite outputs:
+The weights encode business priority for a time-critical incident: **time is weighted highest (0.40)**, then **cost (0.35)**, then **risk (0.25)**. The modifiers make the score *react to live state* — a shrinking inventory buffer raises urgency, a higher freight index erodes cost, and a more severe incident discounts reliability.
 
-| Strategy | Composite score |
-|---|---:|
-| INTERNAL_TRANSFER | **80.00** |
-| AIR_FREIGHT | **65.28** |
-| ALT_SUPPLIER | **60.35** |
+**Base profiles and the worked composite** for the seeded incident (freight index `1.0`; inventory 2 days → urgency `1.05`; severity CRITICAL → discount `0.85`):
+
+| Strategy | base cost / speed / reliability | cost | time (`×1.05`) | risk (`×0.85`) | composite |
+|---|---|---:|---:|---:|---:|
+| INTERNAL_TRANSFER | 90 / 75 / 80 | 90.00 | 78.75 | 68.00 | **80.00** |
+| AIR_FREIGHT | 30 / 95 / 70 | 30.00 | 99.75 | 59.50 | **65.28** |
+| ALT_SUPPLIER | 70 / 55 / 60 | 70.00 | 57.75 | 51.00 | **60.35** |
+
+For example, INTERNAL_TRANSFER: `0.35×90 + 0.40×78.75 + 0.25×68 = 31.5 + 31.5 + 17.0 = 80.00`. The scores are reproducible from the ledger every run.
 
 Scoring only *records* a rating — it does **not** select the strategy. Selection is gated separately by feasibility (Section 7).
+
 
 ### `policy_check`
 
@@ -244,13 +252,12 @@ When the agent commits `ALT_SUPPLIER`, it hands off to a genuine agent-to-agent 
 ```mermaid
 sequenceDiagram
     participant IC as IncidentCommander
-    participant G as asyncio.gather
     participant B as Negotiation Agent (buyer)
     participant SB as Supplier Agent SUP-B
     participant SC as Supplier Agent SUP-C
 
     IC->>IC: negotiation_status = IN_PROGRESS (owns the lock)
-    IC->>G: spawn one negotiation per vendor
+    IC->>B: spawn one negotiation per vendor (asyncio.gather)
     par concurrent
         B->>SB: offer (opens at ceiling × 0.90), step up each turn
         SB-->>B: Accept / Counter / Reject (natural language)
@@ -258,11 +265,12 @@ sequenceDiagram
         B->>SC: offer (opens at ceiling × 0.90), step up each turn
         SC-->>B: Accept / Counter / Reject (natural language)
     end
-    G-->>IC: [SUP-B terms, SUP-C terms]
+    B-->>IC: [SUP-B terms, SUP-C terms]
     IC->>IC: select lowest agreed unit price
     IC->>IC: negotiation_status = SUCCESS + agreed terms
     IC->>IC: enforce spend guardrail
 ```
+
 
 Design points:
 

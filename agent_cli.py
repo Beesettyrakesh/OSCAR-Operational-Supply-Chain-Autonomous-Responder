@@ -82,7 +82,12 @@ class CliRenderer:
     def __call__(self, kind: str, message: str, data: Dict[str, Any]) -> None:
         C, S = self.C, self.S
         if kind == "thought":
-            print(f"\n{self._label('  Reasoning', C.CYAN)} — {message}")
+            # A live thinking model sometimes emits only the Action line (its reasoning stays in
+            # internal thinking tokens). Fall back to a neutral line so the feed never shows a
+            # blank "Reasoning —" (mirrors the dashboard's _thought_text()).
+            body = str(message).strip() or "Assessing the incident and selecting the next action."
+            print(f"\n{self._label('  Reasoning', C.CYAN)} — {body}")
+
         elif kind == "action":
             tool = str(data.get("tool") or message).strip()
             purpose = _TOOL_PURPOSE.get(tool)
@@ -234,6 +239,19 @@ def _parse_args(argv: Any = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _quiet_third_party_logs() -> None:
+    """Silence noisy third-party loggers so the demo transcript shows only OSCAR's own feed.
+
+    The google-genai SDK ("AFC is enabled…") and httpx ("HTTP Request: POST…") log at INFO on
+    every model call; raising them to WARNING keeps the terminal narration clean. Presentation
+    only — it changes no behaviour.
+    """
+    import logging
+
+    for name in ("httpx", "httpcore", "google_genai", "google.genai", "google.adk", "mcp"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def _configure_reasoning_core(live: bool) -> None:
     """Set the in-process env the commander reads at construction.
 
@@ -241,7 +259,9 @@ def _configure_reasoning_core(live: bool) -> None:
     made. --live leaves GEMINI_API_KEY as provided in the environment/.env and switches the
     vendor persona to the live LLM.
     """
+    _quiet_third_party_logs()
     if live:
+
         os.environ["VENDOR_MODE"] = "llm"
         # Live path uses REAL MCP: spawn the 3 category servers and call their tools over the
         # MCP protocol (stdio). Override with MCP_TRANSPORT=inproc if you want direct calls.

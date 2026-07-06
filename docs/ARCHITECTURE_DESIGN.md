@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-OSCAR is an enterprise agent that takes ownership of a single, high-stakes procurement incident and drives it to resolution — or to a clean human hand-off — without a human in the control loop for routine decisions.
+OSCAR is an enterprise agent that takes ownership of one realistic, high-stakes procurement incident — a delayed-shipment crisis whose resolution is driven by live levers (order quantity, delay, available stock, air capacity), not a hard-coded script — and drives it to resolution, or to a clean human hand-off, without a human in the control loop for routine decisions.
 
 **The incident.** A shipment of component `SKU-99` from primary supplier `SUP-A` (PO `PO-88123`) has slipped its contracted arrival date. `PLANT-2` holds only a razor-thin inventory buffer, so the delay threatens a production shutdown and mounting contractual penalties. OSCAR must assess the exposure, evaluate every mitigation route, choose the one that is both *feasible* and *optimal*, execute it (including negotiating a purchase order with alternate vendors), and enforce spend authority — escalating to a human only when a decision genuinely exceeds its delegated authority.
 

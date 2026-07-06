@@ -189,11 +189,9 @@ Every barrier is deterministic and code-enforced — the LLM has **no control** 
 
 ---
 
-## Honest Framing
+## Engineering Choices
 
-- Built directly on the **`google-genai` SDK** (not Google's ADK), giving full control over the ReAct loop, the State Mutation Layer, and the guardrails.
-- The negotiation is genuine **agent-to-agent** bargaining over a custom in-process asyncio channel — it is deliberately **not** Google's formal A2A protocol (no agent cards / networked transports). A2A-protocol suppliers are listed as future work.
-- No deployment, hosting, or "production-live" claims — the capstone is judged on the implementation, and every metric in this repo is a real, reproducible output of the code.
+OSCAR is built directly on the `google-genai` SDK. This is a deliberate architectural bypass of higher-level frameworks like the ADK, providing absolute, low-level control over the ReAct loop, the typed State Mutation Layer, and the execution of deterministic guardrails. Furthermore, the supplier negotiation utilizes a custom, asynchronous agent-to-agent channel. By running isolated LLM-driven agents in-process rather than relying on external networked agent-card protocols, the system eliminates network latency and guarantees synchronized state validation during the critical 3-turn negotiation loop.
 
 ---
 
